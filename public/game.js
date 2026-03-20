@@ -128,6 +128,14 @@ window.addEventListener('touchend',   () => { boosting = false; });
 // ─── Menu / Death Screens ─────────────────────────────────────────────────────
 function joinGame() {
   const name = nameInput.value.trim() || 'Anonymous';
+  if (!socket.connected) {
+    playBtn.textContent = 'CONNECTING...';
+    socket.once('connect', () => {
+      playBtn.textContent = 'PLAY';
+      socket.emit('join', { name });
+    });
+    return;
+  }
   socket.emit('join', { name });
 }
 function respawnGame() {
@@ -139,6 +147,14 @@ playBtn.addEventListener('click', joinGame);
 nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') joinGame(); });
 respawnBtn.addEventListener('click', respawnGame);
 respawnName.addEventListener('keydown', e => { if (e.key === 'Enter') respawnGame(); });
+
+socket.on('connect_error', (err) => {
+  playBtn.textContent = 'CONNECTION FAILED';
+  console.error('Socket error:', err.message);
+});
+socket.on('connect', () => {
+  playBtn.textContent = 'PLAY';
+});
 
 // ─── Socket Events ────────────────────────────────────────────────────────────
 socket.on('joined', ({ id, snake, worldSize: ws }) => {
@@ -164,7 +180,7 @@ socket.on('state', ({ snakes, food, timestamp }) => {
 
     if (s.id === myId) {
       // ── Server reconciliation for own snake ──────────────────────────────
-      if (!mySnake) { mySnake = deepClone(s); return; }
+      if (!mySnake) { mySnake = deepClone(s); continue; }
 
       const dx = s.x - mySnake.x;
       const dy = s.y - mySnake.y;
