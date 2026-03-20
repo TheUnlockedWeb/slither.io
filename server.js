@@ -32,7 +32,15 @@ let foodId = 0, tick = 0;
 
 const rand  = (a,b) => a + Math.random()*(b-a);
 const wrap  = v => ((v % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE;
-const dist2 = (ax,ay,bx,by) => (ax-bx)**2+(ay-by)**2;
+
+// World-wrap aware distance squared
+function dist2(ax,ay,bx,by) {
+  let dx = Math.abs(ax-bx);
+  let dy = Math.abs(ay-by);
+  if (dx > WORLD_SIZE/2) dx = WORLD_SIZE - dx;
+  if (dy > WORLD_SIZE/2) dy = WORLD_SIZE - dy;
+  return dx*dx + dy*dy;
+}
 
 const PALETTES = [
   ['#ff00ff','#cc00ff'],['#00ffcc','#00aaff'],['#ffee00','#ff6600'],
@@ -65,26 +73,23 @@ function createSnake(id, name) {
 
 function tickSnake(s) {
   let d = s.targetAngle - s.angle;
-  while (d> Math.PI) d-=Math.PI*2;
-  while (d<-Math.PI) d+=Math.PI*2;
-  s.angle += Math.sign(d)*Math.min(Math.abs(d), TURN_SPEED);
+  while (d >  Math.PI) d -= Math.PI*2;
+  while (d < -Math.PI) d += Math.PI*2;
+  s.angle += Math.sign(d) * Math.min(Math.abs(d), TURN_SPEED);
 
   const spd = s.boosting ? BOOST_SPEED : SPEED;
-  s.x = wrap(s.x + Math.cos(s.angle)*spd);
-  s.y = wrap(s.y + Math.sin(s.angle)*spd);
+  s.x = wrap(s.x + Math.cos(s.angle) * spd);
+  s.y = wrap(s.y + Math.sin(s.angle) * spd);
 
-  // Distance-based waypoint
-  const h=s.segments[0], dx=s.x-h.x, dy=s.y-h.y;
-  if (dx*dx+dy*dy >= SEG_DIST*SEG_DIST) {
-    s.segments.unshift({x:s.x, y:s.y});
-    s.segments.pop();
-  }
+  // Push every tick — segments are ~5.5px apart, dense enough for reliable collision
+  s.segments.unshift({ x: s.x, y: s.y });
+  s.segments.pop();
 
   // Boost drains tail
-  if (s.boosting && s.segments.length > MIN_BOOST_LEN && tick%2===0) {
+  if (s.boosting && s.segments.length > MIN_BOOST_LEN && tick % 2 === 0) {
     const tail = s.segments.pop();
     spawnFood(tail.x, tail.y, s.colors[0], 4);
-    s.segments.push({...s.segments[s.segments.length-1]});
+    s.segments.push({ ...s.segments[s.segments.length - 1] });
   }
 }
 
@@ -102,17 +107,28 @@ function eatFood(s) {
 
 function checkCollisions() {
   const dead = new Set();
-  const cr2  = (HEAD_R+BODY_R)**2;
-  for (const [aid,a] of snakes) {
-    if (!a.alive||dead.has(aid)) continue;
-    for (const [bid,b] of snakes) {
-      if (!b.alive) continue;
-      // Skip own neck (no self-collision)
-      if (aid===bid) continue;
-      // Only check other snakes' bodies
-      for (let i=0; i<b.segments.length; i++) {
-        if (dist2(a.x,a.y,b.segments[i].x,b.segments[i].y) < cr2) {
-          dead.add(aid); break;
+  // Use visual body radius for reliable detection
+  const KILL_R = 10; // head radius to test
+  const SEG_R  = 9;  // body segment radius
+  const cr2    = (KILL_R + SEG_R) ** 2;
+
+  for (const [aid, a] of snakes) {
+    if (!a.alive || dead.has(aid)) continue;
+
+    for (const [bid, b] of snakes) {
+      if (!b.alive || aid === bid) continue;
+
+      // Check a's head against b's ACTUAL head position (not just waypoint)
+      if (dist2(a.x, a.y, b.x, b.y) < cr2) {
+        dead.add(aid);
+        break;
+      }
+
+      // Check a's head against every segment of b's body
+      for (let i = 0; i < b.segments.length; i++) {
+        if (dist2(a.x, a.y, b.segments[i].x, b.segments[i].y) < cr2) {
+          dead.add(aid);
+          break;
         }
       }
       if (dead.has(aid)) break;

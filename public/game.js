@@ -112,7 +112,12 @@ socket.on('connect_error', ()=>{ const s=document.getElementById('conn-status');
 
 // ── Socket events ─────────────────────────────────────────────────────────────
 socket.on('joined', ({id,snake,worldSize:ws}) => {
-  myId=id; worldSize=ws; mySnake=deepClone(snake); myAngle=snake.angle;
+  myId=id; worldSize=ws;
+  mySnake=deepClone(snake);
+  myAngle=snake.angle;
+  // Track body length in pixels so it stays correct regardless of frame rate
+  // Server body = segment count * speed per tick
+  mySnake.bodyPx = snake.segments.length * SPEED;
   smoothCamX=snake.x-canvas.width/2; smoothCamY=snake.y-canvas.height/2;
   menuScreen.style.display='none'; deathScreen.style.display='none';
   snakeBufs.clear();
@@ -127,9 +132,10 @@ socket.on('state', ({snakes,food}) => {
     if (s.id===myId) {
       if (!mySnake) { mySnake=deepClone(s); continue; }
       mySnake.score=s.score; mySnake.colors=s.colors; mySnake.name=s.name;
-      // Grow if server says longer
-      while (mySnake.segments.length < s.segments.length)
-        mySnake.segments.push({...mySnake.segments[mySnake.segments.length-1]});
+      // Server says we grew — increase pixel body length
+      if (s.segments.length > mySnake.bodyPx / SPEED) {
+        mySnake.bodyPx = s.segments.length * SPEED;
+      }
       scoreVal.textContent=s.score;
       continue;
     }
@@ -186,15 +192,17 @@ function predict(dt) {
   }
 
   // Move head
-  const spd=(boosting?BOOST_SPEED:SPEED)*scale;
-  mySnake.x=wrap(mySnake.x+Math.cos(mySnake.angle)*spd);
-  mySnake.y=wrap(mySnake.y+Math.sin(mySnake.angle)*spd);
+  const spd = (boosting ? BOOST_SPEED : SPEED) * scale;
+  mySnake.x = wrap(mySnake.x + Math.cos(mySnake.angle) * spd);
+  mySnake.y = wrap(mySnake.y + Math.sin(mySnake.angle) * spd);
 
-  // Push new waypoint EVERY FRAME — this is what makes it smooth
-  // We push every frame and pop from tail to keep total pixel-length constant
-  mySnake.segments.unshift({x:mySnake.x, y:mySnake.y});
-  // Keep array same length (tail follows head)
-  mySnake.segments.pop();
+  // Push new head every frame for smooth rendering
+  mySnake.segments.unshift({ x: mySnake.x, y: mySnake.y });
+
+  // Trim tail to maintain correct pixel body length regardless of frame rate
+  // targetCount = how many segments of size `spd` fit in bodyPx
+  const targetCount = Math.max(4, Math.ceil((mySnake.bodyPx || 200) / spd));
+  while (mySnake.segments.length > targetCount) mySnake.segments.pop();
 }
 
 // ── Interpolation ─────────────────────────────────────────────────────────────
@@ -255,78 +263,79 @@ function drawFood() {
 function drawSnake(snake, isMe) {
   const segs = isMe ? snake.segments : snake.segs;
   if (!segs||segs.length<2) return;
-  const [c1,c2]=snake.colors;
+  const [c1]=snake.colors;
   const W=SNAKE_WIDTH;
+  const WRAP_THRESH = worldSize * 0.4; // if jump > this, it's a wrap — break path
+
+  // Build sub-paths that break on world-wrap jumps
+  function buildPaths() {
+    const paths=[[{x:segs[0].x-camX, y:segs[0].y-camY}]];
+    for (let i=1;i<segs.length;i++) {
+      const dx=Math.abs(segs[i].x-segs[i-1].x), dy=Math.abs(segs[i].y-segs[i-1].y);
+      if (dx>WRAP_THRESH||dy>WRAP_THRESH) paths.push([]); // world wrap — new subpath
+      paths[paths.length-1].push({x:segs[i].x-camX, y:segs[i].y-camY});
+    }
+    return paths;
+  }
+
+  function strokePaths(paths) {
+    for (const pts of paths) {
+      if (pts.length<2) continue;
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      for (let i=1;i<pts.length;i++) ctx.lineTo(pts[i].x, pts[i].y);
+      ctx.stroke();
+    }
+  }
 
   ctx.save();
   ctx.lineCap='round'; ctx.lineJoin='round';
+  const paths = buildPaths();
 
-  // Glow pass
-  ctx.shadowBlur=W*2.2; ctx.shadowColor=c1;
-  ctx.strokeStyle=c1+'99'; ctx.lineWidth=W*1.4; ctx.globalAlpha=0.55;
-  ctx.beginPath();
-  let started=false;
-  for (let i=0;i<segs.length;i++) {
-    const sx=segs[i].x-camX, sy=segs[i].y-camY;
-    if (!started){ctx.moveTo(sx,sy);started=true;} else ctx.lineTo(sx,sy);
-  }
-  ctx.stroke();
+  // Outer glow
+  ctx.shadowBlur=W*2.5; ctx.shadowColor=c1;
+  ctx.strokeStyle=c1+'66'; ctx.lineWidth=W*2; ctx.globalAlpha=0.45;
+  strokePaths(paths);
 
-  // Core bright pass
-  ctx.globalAlpha=1; ctx.shadowBlur=W*0.8; ctx.shadowColor=c1;
+  // Core
+  ctx.globalAlpha=1; ctx.shadowBlur=W; ctx.shadowColor=c1;
   ctx.strokeStyle=c1; ctx.lineWidth=W;
-  ctx.beginPath(); started=false;
-  for (let i=0;i<segs.length;i++) {
-    const sx=segs[i].x-camX, sy=segs[i].y-camY;
-    if (!started){ctx.moveTo(sx,sy);started=true;} else ctx.lineTo(sx,sy);
-  }
-  ctx.stroke();
+  strokePaths(paths);
 
-  // Inner highlight
-  ctx.shadowBlur=0; ctx.strokeStyle='rgba(255,255,255,0.25)'; ctx.lineWidth=W*0.3;
-  ctx.beginPath(); started=false;
-  for (let i=0;i<segs.length;i++) {
-    const sx=segs[i].x-camX, sy=segs[i].y-camY;
-    if (!started){ctx.moveTo(sx,sy);started=true;} else ctx.lineTo(sx,sy);
-  }
-  ctx.stroke();
+  // Bright inner spine
+  ctx.shadowBlur=0; ctx.strokeStyle='rgba(255,255,255,0.3)'; ctx.lineWidth=W*0.28;
+  strokePaths(paths);
 
   ctx.globalAlpha=1; ctx.shadowBlur=0;
 
-  // Head — same width as body, just glowing circle cap
+  // Head cap
   const hx=segs[0].x-camX, hy=segs[0].y-camY;
   const hr=W/2+1;
-
-  ctx.shadowBlur=hr*3.5; ctx.shadowColor=c1;
+  ctx.shadowBlur=hr*3; ctx.shadowColor=c1;
   ctx.beginPath(); ctx.arc(hx,hy,hr,0,Math.PI*2);
   ctx.fillStyle=c1; ctx.fill();
   ctx.shadowBlur=0;
 
-  // Eyes — perpendicular to travel direction, no overlap
+  // Eyes
   const ang=snake.angle;
-  const px=-Math.sin(ang), py=Math.cos(ang); // perpendicular
-  const fx= Math.cos(ang)*hr*0.3, fy=Math.sin(ang)*hr*0.3; // slight forward
-  const spread=hr*0.55;
-  const eyeR=hr*0.38;
-
+  const px=-Math.sin(ang), py=Math.cos(ang);
+  const spread=hr*0.6, eyeR=hr*0.4;
   for (const side of [1,-1]) {
-    const ex=hx+fx+px*side*spread, ey=hy+fy+py*side*spread;
+    const ex=hx+px*side*spread, ey=hy+py*side*spread;
     ctx.beginPath(); ctx.arc(ex,ey,eyeR,0,Math.PI*2);
     ctx.fillStyle='white'; ctx.fill();
-    const pupilX=ex+Math.cos(ang)*eyeR*0.5, pupilY=ey+Math.sin(ang)*eyeR*0.5;
-    ctx.beginPath(); ctx.arc(pupilX,pupilY,eyeR*0.55,0,Math.PI*2);
+    ctx.beginPath(); ctx.arc(ex+Math.cos(ang)*eyeR*0.45, ey+Math.sin(ang)*eyeR*0.45, eyeR*0.5,0,Math.PI*2);
     ctx.fillStyle='#111'; ctx.fill();
   }
 
   // Name
   if (snake.name) {
     ctx.font='bold 12px Rajdhani,sans-serif'; ctx.textAlign='center';
-    ctx.shadowBlur=5; ctx.shadowColor='rgba(0,0,0,0.95)';
+    ctx.shadowBlur=5; ctx.shadowColor='rgba(0,0,0,0.9)';
     ctx.fillStyle='rgba(255,255,255,0.95)';
     ctx.fillText(snake.name, hx, hy-hr-7);
     ctx.shadowBlur=0;
   }
-
   ctx.restore();
 }
 
