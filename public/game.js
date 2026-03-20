@@ -27,16 +27,6 @@ const mmCtx     = minimap.getContext('2d');
 const bgCanvas  = document.getElementById('bg-canvas');
 const bgCtx     = bgCanvas.getContext('2d');
 
-function resize() {
-  canvas.width  = window.innerWidth;
-  canvas.height = window.innerHeight;
-  bgCanvas.width  = window.innerWidth;
-  bgCanvas.height = window.innerHeight;
-  drawBgStars();
-}
-window.addEventListener('resize', resize);
-resize();
-
 // ─── Background Stars ─────────────────────────────────────────────────────────
 const STARS = [];
 for (let i = 0; i < 220; i++) {
@@ -57,6 +47,16 @@ function drawBgStars() {
     bgCtx.fill();
   }
 }
+
+function resize() {
+  canvas.width  = window.innerWidth;
+  canvas.height = window.innerHeight;
+  bgCanvas.width  = window.innerWidth;
+  bgCanvas.height = window.innerHeight;
+  drawBgStars();
+}
+window.addEventListener('resize', resize);
+resize();
 
 // ─── Constants (mirror server) ────────────────────────────────────────────────
 const SNAKE_SPEED    = 2.8;
