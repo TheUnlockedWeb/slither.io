@@ -149,11 +149,15 @@ respawnBtn.addEventListener('click', respawnGame);
 respawnName.addEventListener('keydown', e => { if (e.key === 'Enter') respawnGame(); });
 
 socket.on('connect_error', (err) => {
-  playBtn.textContent = 'CONNECTION FAILED';
+  playBtn.textContent = 'PLAY';
+  const s = document.getElementById('conn-status');
+  if (s) { s.textContent = '❌ Cannot reach server'; s.style.color = '#e74c3c'; }
   console.error('Socket error:', err.message);
 });
 socket.on('connect', () => {
   playBtn.textContent = 'PLAY';
+  const s = document.getElementById('conn-status');
+  if (s) { s.textContent = '✅ Connected'; s.style.color = '#2ecc71'; }
 });
 
 // ─── Socket Events ────────────────────────────────────────────────────────────

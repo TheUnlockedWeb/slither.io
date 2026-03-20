@@ -240,6 +240,7 @@
     <p class="sub">Grow big. Destroy all.</p>
     <input id="name-input" type="text" placeholder="Enter your name" maxlength="20" autocomplete="off" />
     <button class="btn" id="play-btn">PLAY</button>
+    <div id="conn-status" style="margin:10px 0 4px;font-size:13px;color:#e67e22;">⚡ Connecting...</div>
     <div class="hints">
       🖱 Move mouse to steer<br>
       🖱 Hold left click or right click to boost<br>
@@ -258,7 +259,15 @@
   </div>
 </div>
 
-<script src="/socket.io/socket.io.js"></script>
+<script src="/socket.io/socket.io.js" onerror="document.getElementById('play-btn').textContent='❌ SERVER NOT RUNNING';document.getElementById('play-btn').style.background='#c0392b';"></script>
+<script>
+  window.addEventListener('error', (e) => {
+    const btn = document.getElementById('play-btn');
+    btn.textContent = '❌ JS ERROR – check console';
+    btn.style.background = '#c0392b';
+    console.error('Game error:', e.message, e.filename, e.lineno);
+  });
+</script>
 <script src="game.js"></script>
 </body>
 </html>
