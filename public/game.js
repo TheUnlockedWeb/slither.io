@@ -59,16 +59,15 @@ window.addEventListener('resize', resize);
 resize();
 
 // ─── Constants (mirror server) ────────────────────────────────────────────────
-const SNAKE_SPEED    = 2.8;
-const BOOST_SPEED    = 5.0;
-const SEGMENT_DIST   = 7;
-const TURN_SPEED     = 0.12;
-const INPUT_HZ       = 20;           // input send rate
+const SERVER_TICK_MS = 50;           // server ticks every 50ms (20/sec)
+const SNAKE_SPEED    = 2.8;          // px per SERVER tick
+const BOOST_SPEED    = 5.0;          // px per SERVER tick
+const SEGMENT_DIST   = 7;            // world-px between stored waypoints
+const TURN_SPEED     = 0.12;         // radians per SERVER tick
+const INPUT_HZ       = 20;
 const INPUT_INTERVAL = 1000 / INPUT_HZ;
-const INTERP_DELAY   = 120;          // ms – render others this far in the past
-const LERP_CORRECT   = 0.25;         // reconciliation lerp factor per frame
-const SNAP_THRESHOLD = 180;          // px – beyond this, snap instead of lerp
-const CAM_LERP       = 0.10;         // camera smoothing
+const INTERP_DELAY   = 120;          // ms behind for other snakes
+const CAM_LERP       = 0.12;
 
 // ─── Socket.io ────────────────────────────────────────────────────────────────
 const socket = io({ transports: ['websocket'] });
@@ -92,6 +91,7 @@ let smoothCamX = 0, smoothCamY = 0;
 
 // Input timing
 let lastInputSend = 0;
+let lastFrameMs   = performance.now(); // for delta-time movement
 
 // Ping
 let pingVal = 0;
@@ -183,29 +183,17 @@ socket.on('state', ({ snakes, food, timestamp }) => {
     activeIds.add(s.id);
 
     if (s.id === myId) {
-      // ── Server reconciliation for own snake ──────────────────────────────
       if (!mySnake) { mySnake = deepClone(s); continue; }
-
-      const dx = s.x - mySnake.x;
-      const dy = s.y - mySnake.y;
-      const d  = Math.sqrt(dx * dx + dy * dy);
-
-      if (d > SNAP_THRESHOLD) {
-        // Large desync → snap
-        mySnake.x        = s.x;
-        mySnake.y        = s.y;
-        mySnake.angle    = s.angle;
-        mySnake.segments = deepCloneSegs(s.segments);
-      } else if (d > 2) {
-        // Small drift → soft lerp
-        mySnake.x += dx * LERP_CORRECT;
-        mySnake.y += dy * LERP_CORRECT;
-      }
-
-      // Always sync score & colour from server (authoritative)
+      // Only sync authoritative non-position data from server.
+      // Never lerp/snap position — that's what causes rubber-banding.
+      // The client prediction IS the truth for rendering.
       mySnake.score  = s.score;
       mySnake.colors = s.colors;
       mySnake.name   = s.name;
+      // Grow segments if server says we're longer (ate food)
+      while (mySnake.segments.length < s.segments.length) {
+        mySnake.segments.push({ ...mySnake.segments[mySnake.segments.length - 1] });
+      }
       scoreVal.textContent = s.score;
       continue;
     }
@@ -242,28 +230,43 @@ socket.on('pong', () => {
 });
 
 // ─── Client-Side Prediction ───────────────────────────────────────────────────
-function predictOwn() {
+function predictOwn(dt) {
   if (!mySnake) return;
 
-  // Derive target angle from mouse relative to screen centre
+  // Scale factor: convert per-server-tick speeds to per-millisecond, then * dt
+  const scale = dt / SERVER_TICK_MS;
+
+  // Derive target angle from mouse
   const dx = mouseX - window.innerWidth  / 2;
   const dy = mouseY - window.innerHeight / 2;
   myAngle = Math.atan2(dy, dx);
 
-  // Same turn logic as server
+  // Turn — scale by dt so turning rate is frame-rate independent
   let diff = myAngle - mySnake.angle;
   while (diff >  Math.PI) diff -= Math.PI * 2;
   while (diff < -Math.PI) diff += Math.PI * 2;
-  mySnake.angle += Math.sign(diff) * Math.min(Math.abs(diff), TURN_SPEED);
+  const maxTurn = TURN_SPEED * scale;
+  mySnake.angle += Math.sign(diff) * Math.min(Math.abs(diff), maxTurn);
 
-  const spd = boosting ? BOOST_SPEED : SNAKE_SPEED;
-
+  // Move head — scale speed by dt
+  const spd = (boosting ? BOOST_SPEED : SNAKE_SPEED) * scale;
+  const prevX = mySnake.x;
+  const prevY = mySnake.y;
   mySnake.x = wrap(mySnake.x + Math.cos(mySnake.angle) * spd);
   mySnake.y = wrap(mySnake.y + Math.sin(mySnake.angle) * spd);
 
-  // Slide segments
-  mySnake.segments.unshift({ x: mySnake.x, y: mySnake.y });
-  mySnake.segments.pop();
+  // ── Distance-based segment insertion ──────────────────────────────────
+  // Only push a new waypoint when head has moved >= SEGMENT_DIST from last one.
+  // This makes body length frame-rate independent.
+  const seg0 = mySnake.segments[0];
+  const sdx  = mySnake.x - seg0.x;
+  const sdy  = mySnake.y - seg0.y;
+  const segD = Math.sqrt(sdx * sdx + sdy * sdy);
+
+  if (segD >= SEGMENT_DIST) {
+    mySnake.segments.unshift({ x: mySnake.x, y: mySnake.y });
+    mySnake.segments.pop();
+  }
 }
 
 // ─── Entity Interpolation ─────────────────────────────────────────────────────
@@ -524,15 +527,16 @@ function updateLeaderboard(all) {
 }
 
 // ─── Main Loop ────────────────────────────────────────────────────────────────
-let lastFrameTime = 0;
 
 function loop(ts) {
   requestAnimationFrame(loop);
 
   const now = Date.now();
+  const dt  = Math.min(ts - lastFrameMs, 100); // cap at 100ms to avoid huge jumps
+  lastFrameMs = ts;
 
-  // 1. Client-side prediction for own snake (runs every frame = 60fps)
-  predictOwn();
+  // 1. Client-side prediction — delta-time based, smooth at any fps
+  predictOwn(dt);
 
   // 2. Send input at INPUT_HZ (20/sec)
   if (mySnake && now - lastInputSend >= INPUT_INTERVAL) {
@@ -567,8 +571,6 @@ function loop(ts) {
 
   drawMinimap(allSnakes);
   updateLeaderboard(allSnakes);
-
-  lastFrameTime = ts;
 }
 
 requestAnimationFrame(loop);
