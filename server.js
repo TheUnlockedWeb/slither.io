@@ -1,291 +1,184 @@
 const express = require('express');
-const http = require('http');
+const http    = require('http');
 const { Server } = require('socket.io');
-const path = require('path');
+const path    = require('path');
 
-const app = express();
+const app    = express();
 const server = http.createServer(app);
-const io = new Server(server, {
+const io     = new Server(server, {
   cors: { origin: '*' },
-  // Optimize for low-latency
   pingInterval: 2000,
-  pingTimeout: 5000,
-  transports: ['websocket', 'polling']
+  pingTimeout:  5000,
+  transports:   ['websocket', 'polling']
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-const TICK_RATE        = 20;              // Server updates per second
-const TICK_MS          = 1000 / TICK_RATE;
-const WORLD_SIZE       = 5000;
-const FOOD_TARGET      = 800;
-const SNAKE_SPEED      = 2.8;            // px per tick
-const BOOST_SPEED      = 5.0;
-const SEGMENT_DIST     = 7;              // distance between body segments
-const INITIAL_SEGS     = 12;
-const TURN_SPEED       = 0.12;           // radians snapped per tick
-const COLLISION_RADIUS = 9;             // head-to-body collision radius
-const GROW_PER_FOOD    = 4;             // segments added when eating food
-const BOOST_DRAIN      = 0.8;           // segments lost per tick when boosting
-const MIN_BOOST_SEGS   = 8;
+const TICK_RATE      = 20;
+const TICK_MS        = 1000 / TICK_RATE;
+const WORLD_SIZE     = 4000;
+const FOOD_TARGET    = 600;
+const SNAKE_SPEED    = 5.5;
+const BOOST_SPEED    = 9.0;
+const SEGMENT_DIST   = 8;
+const INITIAL_LENGTH = 20;
+const TURN_SPEED     = 0.14;
+const HEAD_RADIUS    = 10;
+const BODY_RADIUS    = 7;
+const GROW_PER_FOOD  = 6;
+const MIN_BOOST_LEN  = 10;
 
-// ─── State ────────────────────────────────────────────────────────────────────
 const snakes = new Map();
 const food   = new Map();
-let foodId   = 0;
-let tickCount = 0;
+let   foodId = 0;
+let   tickN  = 0;
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-function randRange(min, max) { return min + Math.random() * (max - min); }
+const rand  = (a,b) => a + Math.random()*(b-a);
+const wrap  = v     => ((v % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE;
+const dist2 = (ax,ay,bx,by) => { const dx=ax-bx,dy=ay-by; return dx*dx+dy*dy; };
 
-function randColor() {
-  const palettes = [
-    ['#ff6b6b','#ff8e53'], ['#4facfe','#00f2fe'], ['#43e97b','#38f9d7'],
-    ['#fa709a','#fee140'], ['#a18cd1','#fbc2eb'], ['#ffecd2','#fcb69f'],
-    ['#ff9a9e','#fad0c4'], ['#a1c4fd','#c2e9fb'], ['#d4fc79','#96e6a1'],
-    ['#f093fb','#f5576c'], ['#4481eb','#04befe'], ['#0ba360','#3cba92']
-  ];
-  return palettes[Math.floor(Math.random() * palettes.length)];
-}
+const PALETTES = [
+  ['#ff00ff','#aa00ff'],['#00ffcc','#0088ff'],['#ffff00','#ff6600'],
+  ['#ff3366','#ff9900'],['#00ff88','#00ccff'],['#ff00aa','#6600ff'],
+  ['#ff6600','#ffcc00'],['#33ffcc','#3388ff'],['#ff3399','#ff6600'],
+  ['#00ffff','#0044ff'],['#ccff00','#00ff66'],['#ff0055','#ff66cc'],
+];
+const randColor = () => PALETTES[Math.random()*PALETTES.length|0];
 
-function wrapPos(v) {
-  return ((v % WORLD_SIZE) + WORLD_SIZE) % WORLD_SIZE;
-}
-
-function dist2(ax, ay, bx, by) {
-  const dx = ax - bx, dy = ay - by;
-  return dx * dx + dy * dy;
-}
-
-// ─── Food ─────────────────────────────────────────────────────────────────────
-function spawnFood(x, y, color, size) {
+function spawnFood(x,y,color,r) {
   const id = foodId++;
   food.set(id, {
     id,
-    x: x ?? randRange(50, WORLD_SIZE - 50),
-    y: y ?? randRange(50, WORLD_SIZE - 50),
-    color: color ?? `hsl(${Math.random() * 360 | 0},80%,65%)`,
-    r: size ?? (3 + Math.random() * 3.5)
+    x:     x     ?? rand(60, WORLD_SIZE-60),
+    y:     y     ?? rand(60, WORLD_SIZE-60),
+    color: color ?? `hsl(${Math.random()*360|0},100%,65%)`,
+    r:     r     ?? (3 + Math.random()*3)
   });
 }
+for (let i=0;i<FOOD_TARGET;i++) spawnFood();
 
-for (let i = 0; i < FOOD_TARGET; i++) spawnFood();
-
-// ─── Snake ────────────────────────────────────────────────────────────────────
 function createSnake(id, name) {
-  const x = randRange(300, WORLD_SIZE - 300);
-  const y = randRange(300, WORLD_SIZE - 300);
-  const angle = Math.random() * Math.PI * 2;
-  const colors = randColor();
-  const segments = [];
-
-  for (let i = 0; i < INITIAL_SEGS; i++) {
-    segments.push({
-      x: wrapPos(x - Math.cos(angle) * i * SEGMENT_DIST),
-      y: wrapPos(y - Math.sin(angle) * i * SEGMENT_DIST)
-    });
-  }
-
-  return {
-    id, name,
-    x, y,
-    angle,
-    targetAngle: angle,
-    segments,
-    colors,
-    score: 0,
-    alive: true,
-    boosting: false
-  };
+  const x=rand(400,WORLD_SIZE-400), y=rand(400,WORLD_SIZE-400);
+  const angle = Math.random()*Math.PI*2;
+  const segs=[];
+  for (let i=0;i<INITIAL_LENGTH;i++) segs.push({
+    x: wrap(x - Math.cos(angle)*i*SEGMENT_DIST),
+    y: wrap(y - Math.sin(angle)*i*SEGMENT_DIST)
+  });
+  return {id,name,x,y,angle,targetAngle:angle,segments:segs,
+          colors:randColor(),score:0,alive:true,boosting:false};
 }
 
-// ─── Tick Logic ───────────────────────────────────────────────────────────────
-function tickSnake(snake) {
-  // Smooth turn
-  let diff = snake.targetAngle - snake.angle;
-  while (diff >  Math.PI) diff -= Math.PI * 2;
-  while (diff < -Math.PI) diff += Math.PI * 2;
-  snake.angle += Math.sign(diff) * Math.min(Math.abs(diff), TURN_SPEED);
+function tickSnake(s) {
+  let d = s.targetAngle - s.angle;
+  while (d >  Math.PI) d -= Math.PI*2;
+  while (d < -Math.PI) d += Math.PI*2;
+  s.angle += Math.sign(d) * Math.min(Math.abs(d), TURN_SPEED);
 
-  const spd = snake.boosting ? BOOST_SPEED : SNAKE_SPEED;
+  const spd = s.boosting ? BOOST_SPEED : SNAKE_SPEED;
+  s.x = wrap(s.x + Math.cos(s.angle)*spd);
+  s.y = wrap(s.y + Math.sin(s.angle)*spd);
 
-  // Move head
-  snake.x = wrapPos(snake.x + Math.cos(snake.angle) * spd);
-  snake.y = wrapPos(snake.y + Math.sin(snake.angle) * spd);
+  const h=s.segments[0], dx=s.x-h.x, dy=s.y-h.y;
+  if (dx*dx+dy*dy >= SEGMENT_DIST*SEGMENT_DIST) {
+    s.segments.unshift({x:s.x,y:s.y});
+    s.segments.pop();
+  }
 
-  // Push new head segment, maintain chain length
-  snake.segments.unshift({ x: snake.x, y: snake.y });
-  snake.segments.pop();
-
-  // Boost drains length
-  if (snake.boosting && snake.segments.length > MIN_BOOST_SEGS) {
-    // Every 2 ticks drop a segment, spawn food there
-    if (tickCount % 2 === 0) {
-      const tail = snake.segments.pop();
-      spawnFood(tail.x, tail.y, snake.colors[0], 4);
-    }
+  if (s.boosting && s.segments.length > MIN_BOOST_LEN && tickN%2===0) {
+    const tail = s.segments.pop();
+    spawnFood(tail.x, tail.y, s.colors[0], 4);
+    s.segments.push({...s.segments[s.segments.length-1]});
   }
 }
 
-function eatFood(snake) {
-  const r2 = 16 * 16;
-  for (const [id, f] of food) {
-    if (dist2(snake.x, snake.y, f.x, f.y) < r2) {
-      food.delete(id);
-      spawnFood(); // replenish
-      snake.score += Math.ceil(f.r);
-      const tail = snake.segments[snake.segments.length - 1];
-      for (let i = 0; i < GROW_PER_FOOD; i++) {
-        snake.segments.push({ ...tail });
-      }
+function eatFood(s) {
+  const r2 = (HEAD_RADIUS+10)*(HEAD_RADIUS+10);
+  for (const [id,f] of food) {
+    if (dist2(s.x,s.y,f.x,f.y) < r2) {
+      food.delete(id); spawnFood();
+      s.score += Math.ceil(f.r);
+      const tail = s.segments[s.segments.length-1];
+      for (let i=0;i<GROW_PER_FOOD;i++) s.segments.push({...tail});
     }
   }
 }
 
 function checkCollisions() {
-  const dead = [];
-  const r2 = COLLISION_RADIUS * COLLISION_RADIUS;
-
-  for (const [aid, a] of snakes) {
-    if (!a.alive) continue;
-
-    for (const [bid, b] of snakes) {
+  const dead = new Set();
+  const cr2  = (HEAD_RADIUS+BODY_RADIUS)*(HEAD_RADIUS+BODY_RADIUS);
+  for (const [aid,a] of snakes) {
+    if (!a.alive || dead.has(aid)) continue;
+    for (const [bid,b] of snakes) {
       if (!b.alive) continue;
-
-      const startI = (aid === bid) ? 5 : 0; // skip own head area
-
-      for (let i = startI; i < b.segments.length; i++) {
-        if (dist2(a.x, a.y, b.segments[i].x, b.segments[i].y) < r2) {
-          dead.push(aid);
-          // If two snakes collide head-on, both die
-          if (aid !== bid && i < 3) dead.push(bid);
-          break;
+      const skip = aid===bid ? 8 : 0;
+      for (let i=skip; i<b.segments.length; i++) {
+        if (dist2(a.x,a.y,b.segments[i].x,b.segments[i].y) < cr2) {
+          dead.add(aid); break;
         }
       }
-      if (dead.includes(aid)) break;
+      if (dead.has(aid)) break;
     }
   }
-
-  return [...new Set(dead)];
+  return dead;
 }
 
 function killSnake(id) {
-  const snake = snakes.get(id);
-  if (!snake || !snake.alive) return;
-  snake.alive = false;
-
-  // Explode into food
-  for (let i = 0; i < snake.segments.length; i += 2) {
-    const seg = snake.segments[i];
-    spawnFood(
-      seg.x + randRange(-8, 8),
-      seg.y + randRange(-8, 8),
-      snake.colors[0],
-      5 + Math.random() * 3
-    );
+  const s = snakes.get(id);
+  if (!s||!s.alive) return;
+  s.alive = false;
+  for (let i=0;i<s.segments.length;i++) {
+    const seg=s.segments[i];
+    spawnFood(seg.x+rand(-5,5), seg.y+rand(-5,5), s.colors[i%2], 4+Math.random()*3);
   }
-
-  io.to(id).emit('died', { score: snake.score });
+  io.to(id).emit('died', {score:s.score});
 }
 
-// ─── Game Loop ────────────────────────────────────────────────────────────────
 function gameTick() {
-  tickCount++;
-
-  for (const [, snake] of snakes) {
-    if (snake.alive) {
-      tickSnake(snake);
-      eatFood(snake);
-    }
-  }
-
+  tickN++;
+  for (const [,s] of snakes) if (s.alive) { tickSnake(s); eatFood(s); }
   const dead = checkCollisions();
   for (const id of dead) killSnake(id);
-
-  // Replenish food pool
   while (food.size < FOOD_TARGET) spawnFood();
 
-  // Build snapshot
-  const snakeArr = [];
-  for (const [, s] of snakes) {
+  const snakeArr=[];
+  for (const [,s] of snakes) {
     if (!s.alive) continue;
-    snakeArr.push({
-      id:       s.id,
-      name:     s.name,
-      x:        s.x,
-      y:        s.y,
-      angle:    s.angle,
-      segments: s.segments,
-      colors:   s.colors,
-      score:    s.score,
-      boosting: s.boosting
-    });
+    snakeArr.push({id:s.id,name:s.name,x:s.x,y:s.y,angle:s.angle,
+                   segments:s.segments,colors:s.colors,score:s.score,boosting:s.boosting});
   }
-
-  io.emit('state', {
-    snakes:    snakeArr,
-    food:      [...food.values()],
-    timestamp: Date.now()
-  });
+  io.emit('state', {snakes:snakeArr, food:[...food.values()], ts:Date.now()});
 }
 
-// Use setInterval with drift compensation
-let lastTick = Date.now();
+let lastTick=Date.now();
 function scheduleNext() {
-  const now = Date.now();
-  const drift = now - lastTick - TICK_MS;
-  lastTick = now;
-  gameTick();
-  setTimeout(scheduleNext, Math.max(0, TICK_MS - drift));
+  const now=Date.now(), drift=now-lastTick-TICK_MS;
+  lastTick=now; gameTick();
+  setTimeout(scheduleNext, Math.max(0, TICK_MS-drift));
 }
 setTimeout(scheduleNext, TICK_MS);
 
-// ─── Socket.IO ────────────────────────────────────────────────────────────────
-io.on('connection', (socket) => {
-  console.log(`[+] ${socket.id}`);
-
-  socket.on('join', ({ name }) => {
-    const snake = createSnake(socket.id, (name || 'Anonymous').slice(0, 20));
-    snakes.set(socket.id, snake);
-    socket.emit('joined', {
-      id:        socket.id,
-      snake,
-      worldSize: WORLD_SIZE,
-      tickRate:  TICK_RATE
-    });
+io.on('connection', socket => {
+  socket.on('join', ({name}) => {
+    const s=createSnake(socket.id,(name||'Anonymous').slice(0,20));
+    snakes.set(socket.id,s);
+    socket.emit('joined',{id:socket.id,snake:s,worldSize:WORLD_SIZE,tickRate:TICK_RATE});
   });
-
-  socket.on('respawn', ({ name }) => {
-    const snake = createSnake(socket.id, (name || 'Anonymous').slice(0, 20));
-    snakes.set(socket.id, snake);
-    socket.emit('joined', {
-      id:        socket.id,
-      snake,
-      worldSize: WORLD_SIZE,
-      tickRate:  TICK_RATE
-    });
+  socket.on('respawn', ({name}) => {
+    const s=createSnake(socket.id,(name||'Anonymous').slice(0,20));
+    snakes.set(socket.id,s);
+    socket.emit('joined',{id:socket.id,snake:s,worldSize:WORLD_SIZE,tickRate:TICK_RATE});
   });
-
-  socket.on('input', ({ angle, boosting }) => {
-    const snake = snakes.get(socket.id);
-    if (snake && snake.alive) {
-      if (typeof angle === 'number' && isFinite(angle)) {
-        snake.targetAngle = angle;
-      }
-      snake.boosting = !!boosting;
+  socket.on('input', ({angle,boosting}) => {
+    const s=snakes.get(socket.id);
+    if (s&&s.alive) {
+      if (typeof angle==='number'&&isFinite(angle)) s.targetAngle=angle;
+      s.boosting=!!boosting;
     }
   });
-
-  // Latency probe
-  socket.on('ping', (t) => socket.emit('pong', t));
-
-  socket.on('disconnect', () => {
-    snakes.delete(socket.id);
-    console.log(`[-] ${socket.id}`);
-  });
+  socket.on('ping', t => socket.emit('pong',t));
+  socket.on('disconnect', () => snakes.delete(socket.id));
 });
 
-// ─── Start ────────────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Slither clone listening on :${PORT}`));
+const PORT=process.env.PORT||3000;
+server.listen(PORT,()=>console.log(`Slither on :${PORT}`));
