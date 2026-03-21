@@ -41,8 +41,9 @@ const TURN_SPEED     = 0.16;  // rad/server-tick
 const SERVER_MS      = 50;    // server tick interval
 const INPUT_INTERVAL = 50;    // send input at 20hz
 const INTERP_DELAY   = 100;   // ms buffer for other snakes
-const CAM_LERP       = 0.14;
-const SNAKE_WIDTH    = 12;    // uniform body width — no tapering
+const ZOOM         = 0.6;  // show more world — 1.0 = 1:1, lower = zoomed out
+const CAM_LERP     = 0.14;
+const SNAKE_WIDTH  = 12;
 
 // ── Socket ────────────────────────────────────────────────────────────────────
 const socket = io({ transports: ['websocket'] });
@@ -115,36 +116,40 @@ socket.on('joined', ({id,snake,worldSize:ws}) => {
   myId=id; worldSize=ws;
   mySnake=deepClone(snake);
   myAngle=snake.angle;
-  // Track body length in pixels so it stays correct regardless of frame rate
-  // Server body = segment count * speed per tick
   mySnake.bodyPx = snake.segments.length * SPEED;
   smoothCamX=snake.x-canvas.width/2; smoothCamY=snake.y-canvas.height/2;
   menuScreen.style.display='none'; deathScreen.style.display='none';
-  snakeBufs.clear();
+  // Only remove OWN entry from buffer, keep other players' data intact
+  snakeBufs.delete(id);
 });
 
 socket.on('state', ({snakes,food}) => {
   const now=Date.now();
   serverFood=food;
   const active=new Set();
+
   for (const s of snakes) {
     active.add(s.id);
-    if (s.id===myId) {
-      if (!mySnake) { mySnake=deepClone(s); continue; }
+
+    if (s.id === myId) {
+      if (!mySnake) { mySnake=deepClone(s); }
       mySnake.score=s.score; mySnake.colors=s.colors; mySnake.name=s.name;
-      // Server says we grew — increase pixel body length
-      if (s.segments.length > mySnake.bodyPx / SPEED) {
+      if (s.segments.length > mySnake.bodyPx / SPEED)
         mySnake.bodyPx = s.segments.length * SPEED;
-      }
       scoreVal.textContent=s.score;
       continue;
     }
-    if (!snakeBufs.has(s.id)) snakeBufs.set(s.id,[]);
-    const buf=snakeBufs.get(s.id);
-    buf.push({...s, segs:s.segments.map(p=>({x:p.x,y:p.y})), at:now});
-    if (buf.length>30) buf.shift();
+
+    // Other snake — store latest snapshot
+    if (!snakeBufs.has(s.id)) snakeBufs.set(s.id, []);
+    const buf = snakeBufs.get(s.id);
+    buf.push({ ...s, segs: s.segments.map(p=>({x:p.x,y:p.y})), at: now });
+    if (buf.length > 10) buf.shift(); // keep last 10 snapshots only
   }
-  for (const id of snakeBufs.keys()) if (!active.has(id)) snakeBufs.delete(id);
+
+  // Remove snakes that are gone
+  for (const id of snakeBufs.keys())
+    if (!active.has(id)) snakeBufs.delete(id);
 });
 
 socket.on('died', ({score}) => {
@@ -205,28 +210,36 @@ function predict(dt) {
   while (mySnake.segments.length > targetCount) mySnake.segments.pop();
 }
 
-// ── Interpolation ─────────────────────────────────────────────────────────────
+// ── Interpolation — renders other snakes using latest 2 snapshots ─────────────
 function getInterp(id) {
-  const buf=snakeBufs.get(id);
-  if (!buf||buf.length===0) return null;
-  const rt=Date.now()-INTERP_DELAY;
-  let lo=null,hi=null;
-  for (const s of buf) { if(s.at<=rt) lo=s; else if(!hi){hi=s;break;} }
-  if (!lo) return buf[0];
-  if (!hi) return lo;
-  const t=clamp((rt-lo.at)/(hi.at-lo.at),0,1);
-  const n=Math.min(lo.segs.length,hi.segs.length);
-  const segs=new Array(n);
-  for(let i=0;i<n;i++) segs[i]={x:lerp(lo.segs[i].x,hi.segs[i].x,t),y:lerp(lo.segs[i].y,hi.segs[i].y,t)};
-  return {...lo, x:lerp(lo.x,hi.x,t), y:lerp(lo.y,hi.y,t), angle:lerpAng(lo.angle,hi.angle,t), segs};
+  const buf = snakeBufs.get(id);
+  if (!buf || buf.length === 0) return null;
+
+  // Just use the latest snapshot — no delay needed, keeps it simple and visible
+  if (buf.length === 1) return buf[0];
+
+  // If we have 2+ snapshots, interpolate between last two for smoothness
+  const lo = buf[buf.length - 2];
+  const hi = buf[buf.length - 1];
+  const now = Date.now();
+  const t = clamp((now - hi.at) / Math.max(hi.at - lo.at, 1), 0, 1.5);
+
+  const n = Math.min(lo.segs.length, hi.segs.length);
+  const segs = new Array(n);
+  for (let i = 0; i < n; i++) {
+    segs[i] = { x: lerp(lo.segs[i].x, hi.segs[i].x, t), y: lerp(lo.segs[i].y, hi.segs[i].y, t) };
+  }
+  return { ...hi, x: lerp(lo.x, hi.x, t), y: lerp(lo.y, hi.y, t), angle: lerpAng(lo.angle, hi.angle, t), segs };
 }
 
 // ── Camera ────────────────────────────────────────────────────────────────────
 function updateCam() {
   if (!mySnake) return;
-  smoothCamX += (mySnake.x-canvas.width/2  - smoothCamX)*CAM_LERP;
-  smoothCamY += (mySnake.y-canvas.height/2 - smoothCamY)*CAM_LERP;
-  camX=smoothCamX; camY=smoothCamY;
+  // Camera tracks snake centre, accounting for zoom
+  smoothCamX += (mySnake.x - (canvas.width  / 2) / ZOOM - smoothCamX) * CAM_LERP;
+  smoothCamY += (mySnake.y - (canvas.height / 2) / ZOOM - smoothCamY) * CAM_LERP;
+  camX = smoothCamX;
+  camY = smoothCamY;
 }
 
 // ── Render ────────────────────────────────────────────────────────────────────
@@ -385,12 +398,21 @@ function loop(ts) {
   updateCam();
 
   ctx.drawImage(bgCanvas,0,0);
+
+  // Apply zoom — scale around canvas centre
+  ctx.save();
+  ctx.translate(canvas.width/2, canvas.height/2);
+  ctx.scale(ZOOM, ZOOM);
+  ctx.translate(-canvas.width/2, -canvas.height/2);
+
   drawGrid();
   drawFood();
 
   const all=[];
   for(const [id] of snakeBufs){ const s=getInterp(id); if(!s)continue; drawSnake(s,false); all.push(s); }
   if(mySnake){ drawSnake(mySnake,true); all.push({...mySnake,id:myId}); }
+
+  ctx.restore();
 
   drawMinimap(all);
   updateLB(all);
